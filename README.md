@@ -24,7 +24,7 @@ Larch provides pre-compiled standalone binaries. You do not need Rust installed.
 The easiest way to install Larch is via our official installation script:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/Joker-Jelly/larch/main/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/Joker-Jelly/larch/master/install.sh | sh
 ```
 
 ### Manual Download
