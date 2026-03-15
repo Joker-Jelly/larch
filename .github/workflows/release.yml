@@ -73,3 +73,4 @@ jobs:
         with:
           files: ${{ matrix.asset_name }}
           generate_release_notes: true
+          make_latest: true
