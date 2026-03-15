@@ -1,0 +1,75 @@
+name: Release Larch
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger on version tags
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and Release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            exe_name: larch
+            asset_name: larch-linux-amd64.tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            exe_name: larch
+            asset_name: larch-linux-arm64.tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            exe_name: larch
+            asset_name: larch-darwin-amd64.tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            exe_name: larch
+            asset_name: larch-darwin-arm64.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe_name: larch.exe
+            asset_name: larch-windows-amd64.zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build Release
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czvf ../../../${{ matrix.asset_name }} ${{ matrix.exe_name }}
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd target\${{ matrix.target }}\release
+          Compress-Archive -Path ${{ matrix.exe_name }} -DestinationPath ..\..\..\${{ matrix.asset_name }}
+
+      - name: Release Configuration
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset_name }}
+          generate_release_notes: true

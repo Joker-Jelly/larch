@@ -1,0 +1,52 @@
+[package]
+name = "larch"
+version = "0.1.0"
+edition = "2021"
+description = "Local-first Markdown AI Knowledge Engine"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Full-text search
+tantivy = "0.22"
+tantivy-jieba = "0.11"
+
+# Markdown parsing
+pulldown-cmark = "0.12"
+
+# YAML frontmatter
+gray_matter = "0.2"
+
+# HTTP server
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors"] }
+
+# File watching
+notify = "8"
+notify-debouncer-full = "0.5"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Error handling
+anyhow = "1"
+
+# MCP protocol
+rmcp = { version = "1.2.0", features = ["server", "transport-io"] }
+
+# Asset handling
+sha2 = "0.10"
+regex = "1"
+
+# Logging / timestamps
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+
+# Misc
+walkdir = "2"
+dirs = "5.0"
