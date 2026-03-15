@@ -18,16 +18,19 @@ Built in Rust, it uses **Tantivy** for high-performance full-text search and is 
 
 ## 📦 Installation
 
-To build and install Larch from source, you need [Rust and Cargo](https://rustup.rs/) installed:
+Larch provides pre-compiled standalone binaries. You do not need Rust installed.
+
+### Quick Install (macOS / Linux)
+The easiest way to install Larch is via our official installation script:
 
 ```bash
-git clone https://github.com/YourGitHub/larch.git
-cd larch
-cargo build --release
-
-# Optional: move it to your bin directory
-sudo cp target/release/larch /usr/local/bin/
+curl -LsSf https://raw.githubusercontent.com/Joker-Jelly/larch/main/install.sh | sh
 ```
+
+### Manual Download
+1. Go to the [Releases page](https://github.com/Joker-Jelly/larch/releases/latest) on GitHub.
+2. Download the binary archive for your operating system and architecture.
+3. Extract the `larch` executable and move it to your path (e.g. `/usr/local/bin`).
 
 ## 🛠️ Usage
 
@@ -60,6 +63,16 @@ This will start the file watcher (to auto-index new changes) and expose the HTTP
 larch serve --port 3000
 ```
 *Tip: Run this in the background using `nohup larch serve > ~/.larch/logs/larch.log 2>&1 &` or manage it via `systemd`/`pm2`.*
+
+## 🛠️ Development (Build from Source)
+
+If you prefer to compile Larch yourself or want to contribute to the project, you'll need [Rust and Cargo](https://rustup.rs/) installed:
+
+```bash
+git clone https://github.com/Joker-Jelly/larch.git
+cd larch
+cargo build --release
+```
 
 ---
 
