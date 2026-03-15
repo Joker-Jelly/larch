@@ -55,8 +55,12 @@ fi
 
 echo "Found latest version: $LATEST_TAG"
 
-# Assuming standard naming convention for your release assets. Update this to match your actual GitHub flow
-ASSET_NAME="${BIN_NAME}-${LATEST_TAG}-${OS}-${ARCH}.tar.gz"
+# Assuming standard naming convention for your release assets.
+ASSET_NAME="${BIN_NAME}-${OS}-${ARCH}.tar.gz"
+# Windows assets are zip files in the workflow
+if [ "$OS" = "windows" ]; then
+    ASSET_NAME="${BIN_NAME}-${OS}-${ARCH}.zip"
+fi
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_TAG}/${ASSET_NAME}"
 
 # Temp dir for extraction
@@ -64,7 +68,7 @@ TMP_DIR=$(mktemp -d)
 cd "$TMP_DIR"
 
 echo "Downloading $DOWNLOAD_URL..."
-curl -sL "$DOWNLOAD_URL" -o "$ASSET_NAME"
+curl -fsSL "$DOWNLOAD_URL" -o "$ASSET_NAME"
 
 echo "Extracting..."
 tar -xzf "$ASSET_NAME"
