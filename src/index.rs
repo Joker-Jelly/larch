@@ -16,6 +16,8 @@ const F_CONTENT: &str = "content";
 const F_START_LINE: &str = "start_line";
 const F_END_LINE: &str = "end_line";
 const F_KEYWORDS: &str = "keywords";
+const F_TAGS: &str = "tags";
+const F_DIRS: &str = "dirs";
 const F_SUMMARY: &str = "summary";
 const F_VERSION: &str = "version";
 const F_CREATED_AT: &str = "created_at";
@@ -36,6 +38,7 @@ pub struct SearchResult {
     pub score: f32,
     pub summary: String,
     pub keywords: String,
+    pub tags: Vec<String>,
 }
 
 /// Holds field references to avoid repeated schema lookups.
@@ -48,6 +51,8 @@ pub struct SchemaFields {
     pub start_line: Field,
     pub end_line: Field,
     pub keywords: Field,
+    pub tags: Field,
+    pub dirs: Field,
     pub summary: Field,
     pub version: Field,
     pub created_at: Field,
@@ -93,6 +98,18 @@ fn build_schema() -> (Schema, SchemaFields) {
             )
             .set_stored(),
     );
+    let tags = builder.add_text_field(
+        F_TAGS,
+        TextOptions::default()
+            .set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer("raw")
+                    .set_index_option(IndexRecordOption::Basic),
+            )
+            .set_stored()
+            .set_fast(None),
+    );
+    let dirs = builder.add_facet_field(F_DIRS, INDEXED);
     let summary = builder.add_text_field(F_SUMMARY, STORED);
     let version = builder.add_text_field(F_VERSION, STRING | STORED);
     let created_at = builder.add_text_field(
@@ -115,6 +132,8 @@ fn build_schema() -> (Schema, SchemaFields) {
         start_line,
         end_line,
         keywords,
+        tags,
+        dirs,
         summary,
         version,
         created_at,
@@ -174,6 +193,24 @@ pub fn index_file(
         doc.add_u64(fields.start_line, chunk.start_line);
         doc.add_u64(fields.end_line, chunk.end_line);
         doc.add_text(fields.keywords, chunk.keywords.join(" "));
+        
+        for tag in &chunk.tags {
+            doc.add_text(fields.tags, tag);
+        }
+
+        let path = std::path::Path::new(file_path);
+        if let Some(parent) = path.parent() {
+            let parent_str = parent.to_string_lossy().replace('\\', "/");
+            let facet_path = if parent_str.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{}", parent_str)
+            };
+            doc.add_facet(fields.dirs, tantivy::schema::Facet::from(&facet_path));
+        } else {
+            doc.add_facet(fields.dirs, tantivy::schema::Facet::from("/"));
+        }
+
         doc.add_text(fields.summary, summary_str);
         doc.add_text(fields.version, version_str);
         doc.add_text(fields.created_at, created_at_str);
@@ -190,7 +227,14 @@ pub fn remove_file(writer: &IndexWriter, fields: &SchemaFields, file_path: &str)
 }
 
 /// Execute a search query and return results.
-pub fn search(index: &Index, fields: &SchemaFields, query_str: &str, limit: usize) -> Result<Vec<SearchResult>> {
+pub fn search(
+    index: &Index,
+    fields: &SchemaFields,
+    query_str: &str,
+    tag: Option<&str>,
+    dir: Option<&str>,
+    limit: usize,
+) -> Result<Vec<SearchResult>> {
     let reader = index
         .reader_builder()
         .reload_policy(ReloadPolicy::OnCommitWithDelay)
@@ -199,19 +243,54 @@ pub fn search(index: &Index, fields: &SchemaFields, query_str: &str, limit: usiz
 
     let searcher = reader.searcher();
 
-    let query_parser = QueryParser::for_index(
+    let mut query_parser = QueryParser::for_index(
         index,
         vec![fields.content, fields.title_hierarchy, fields.keywords],
     );
-    let query = query_parser
+    query_parser.set_field_boost(fields.keywords, 3.0);
+    query_parser.set_field_boost(fields.title_hierarchy, 2.0);
+    query_parser.set_field_boost(fields.content, 1.0);
+
+    let parsed_query = query_parser
         .parse_query(query_str)
         .context("parsing query")?;
 
+    let mut boolean_queries: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> = vec![
+        (tantivy::query::Occur::Must, parsed_query.box_clone()),
+    ];
+
+    if let Some(t) = tag {
+        let tag_term = tantivy::Term::from_field_text(fields.tags, t);
+        let tag_query = Box::new(tantivy::query::TermQuery::new(
+            tag_term,
+            tantivy::schema::IndexRecordOption::Basic,
+        ));
+        boolean_queries.push((tantivy::query::Occur::Must, tag_query));
+    }
+
+    if let Some(d) = dir {
+        let facet_path = if d.starts_with('/') {
+            d.to_string()
+        } else {
+            format!("/{}", d)
+        };
+        let facet = tantivy::schema::Facet::from(&facet_path);
+        let dir_term = tantivy::Term::from_facet(fields.dirs, &facet);
+        let dir_query = Box::new(tantivy::query::TermQuery::new(
+            dir_term,
+            tantivy::schema::IndexRecordOption::Basic,
+        ));
+        boolean_queries.push((tantivy::query::Occur::Must, dir_query));
+    }
+
+    let final_query = tantivy::query::BooleanQuery::new(boolean_queries);
+
     let top_docs = searcher
-        .search(&query, &TopDocs::with_limit(limit))
+        .search(&final_query, &TopDocs::with_limit(limit))
         .context("executing search")?;
 
-    let _schema = index.schema();
+    let snippet_generator = tantivy::SnippetGenerator::create(&searcher, &*parsed_query, fields.content)?;
+    
     let mut results = Vec::new();
 
     for (score, doc_addr) in top_docs {
@@ -229,13 +308,38 @@ pub fn search(index: &Index, fields: &SchemaFields, query_str: &str, limit: usiz
                 .unwrap_or(0)
         };
 
-        // Build a content snippet (truncate to ~200 chars for display)
-        let full_content = get_text(fields.content);
-        let content_snippet = if full_content.chars().count() > 200 {
-            let truncated: String = full_content.chars().take(200).collect();
-            format!("{}...", truncated)
+        let mut tags = Vec::new();
+        for value in doc.get_all(fields.tags) {
+            if let Some(s) = value.as_str() {
+                tags.push(s.to_string());
+            }
+        }
+
+        // Build a content snippet
+        let snippet = snippet_generator.snippet_from_doc(&doc);
+        
+        let content_snippet = if snippet.is_empty() {
+            let full_content = get_text(fields.content);
+            if full_content.chars().count() > 200 {
+                let truncated: String = full_content.chars().take(200).collect();
+                format!("{}...", truncated)
+            } else {
+                full_content
+            }
         } else {
-            full_content
+            // The easiest and safest way is to use `to_html` and replace the tags with ANSI codes
+            // Because Tantivy correctly handles byte boundaries for multi-byte UTF-8 chars in `to_html`.
+            // We also decode basic HTML entities escaped by Tantivy's encode_minimal.
+            snippet
+                .to_html()
+                .replace("<b>", "\x1b[1;31m")  // Bold Red for highlight
+                .replace("</b>", "\x1b[0m")    // Reset
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&")
+                .replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replace('\n', " ")
         };
 
         results.push(SearchResult {
@@ -248,6 +352,7 @@ pub fn search(index: &Index, fields: &SchemaFields, query_str: &str, limit: usiz
             score,
             summary: get_text(fields.summary),
             keywords: get_text(fields.keywords),
+            tags,
         });
     }
 
@@ -275,6 +380,7 @@ mod tests {
             title: Some("Test Doc".into()),
             summary: Some("A test document".into()),
             tags: vec!["test".into()],
+            keywords: vec!["meta_kw".into()],
             version: Some("1.0".into()),
             date: Some("2026-01-01".into()),
         };
@@ -286,7 +392,8 @@ mod tests {
                 content: "Rust 并发模型 解析 RwLock".into(),
                 start_line: 1,
                 end_line: 5,
-                keywords: vec!["rust".into(), "并发".into()],
+                tags: vec!["rust".into(), "并发".into()],
+                keywords: vec!["meta_kw".into()],
             },
             Chunk {
                 chunk_id: "abc_6".into(),
@@ -295,7 +402,8 @@ mod tests {
                 content: "详细的性能优化指南 performance guide".into(),
                 start_line: 6,
                 end_line: 10,
-                keywords: vec!["性能".into()],
+                tags: vec!["性能".into()],
+                keywords: vec!["meta_kw".into()],
             },
         ];
         (meta, chunks)
@@ -315,13 +423,17 @@ mod tests {
         writer.commit().unwrap();
 
         // Search for Chinese content
-        let results = search(&index, &fields, "并发", 10).unwrap();
+        let results = search(&index, &fields, "并发", None, None, 10).unwrap();
         assert!(!results.is_empty(), "Should find Chinese content");
         assert_eq!(results[0].file_path, "test.md");
 
         // Search for English content
-        let results = search(&index, &fields, "performance", 10).unwrap();
+        let results = search(&index, &fields, "performance", None, None, 10).unwrap();
         assert!(!results.is_empty(), "Should find English content");
+
+        // Search by tag
+        let results = search(&index, &fields, "performance", Some("性能"), None, 10).unwrap();
+        assert!(!results.is_empty(), "Should find content with tag");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -343,7 +455,7 @@ mod tests {
         remove_file(&writer, &fields, "test.md");
         writer.commit().unwrap();
 
-        let results = search(&index, &fields, "并发", 10).unwrap();
+        let results = search(&index, &fields, "并发", None, None, 10).unwrap();
         assert!(results.is_empty(), "Should be empty after removal");
 
         let _ = std::fs::remove_dir_all(&tmp);

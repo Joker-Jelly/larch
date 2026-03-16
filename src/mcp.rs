@@ -23,6 +23,10 @@ pub struct SearchArgs {
     pub query: String,
     /// Maximum number of results to return (default: 10)
     pub limit: Option<usize>,
+    /// Optional tag to filter by
+    pub tag: Option<String>,
+    /// Optional directory to filter by
+    pub dir: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -35,8 +39,54 @@ pub struct ReadContextArgs {
     pub end_line: u64,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct TreeArgs {}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct TagArgs {
+    /// Optional tag to filter by. If omitted, returns all tags.
+    pub tag: Option<String>,
+}
+
 #[tool_router]
 impl McpState {
+    #[tool(
+        name = "tags",
+        description = "Get all tags or documents associated with a specific tag."
+    )]
+    async fn tags(
+        &self,
+        Parameters(args): Parameters<TagArgs>,
+    ) -> Result<String, String> {
+        if let Some(t) = args.tag {
+            let paths = crate::tag::get_files_for_tag(&self.index, self.fields.tags, &t)
+                .map_err(|e| e.to_string())?;
+            let json = serde_json::to_string_pretty(&paths)
+                .map_err(|e| e.to_string())?;
+            Ok(json)
+        } else {
+            let tags = crate::tag::get_all_tags(&self.index, self.fields.tags)
+                .map_err(|e| e.to_string())?;
+            let json = serde_json::to_string_pretty(&tags)
+                .map_err(|e| e.to_string())?;
+            Ok(json)
+        }
+    }
+
+    #[tool(
+        name = "tree",
+        description = "Get the complete directory tree of the vault."
+    )]
+    async fn tree(
+        &self,
+        Parameters(_args): Parameters<TreeArgs>,
+    ) -> Result<String, String> {
+        let root = crate::tree::build_tree(&self.config.vault_root);
+        let json = serde_json::to_string_pretty(&root)
+            .map_err(|e| e.to_string())?;
+        Ok(json)
+    }
+
     #[tool(
         name = "search",
         description = "Search the local Larch Markdown knowledge base using keywords."
@@ -46,7 +96,14 @@ impl McpState {
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<String, String> {
         let limit = args.limit.unwrap_or(10);
-        let results = index::search(&self.index, &self.fields, &args.query, limit)
+        let results = index::search(
+            &self.index,
+            &self.fields,
+            &args.query,
+            args.tag.as_deref(),
+            args.dir.as_deref(),
+            limit,
+        )
             .map_err(|e| e.to_string())?;
 
         let json = serde_json::to_string_pretty(&results)

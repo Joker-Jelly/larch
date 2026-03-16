@@ -14,6 +14,8 @@ pub struct FileMeta {
     pub date: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
     pub summary: Option<String>,
     pub version: Option<String>,
 }
@@ -27,6 +29,7 @@ pub struct Chunk {
     pub content: String,
     pub start_line: u64,
     pub end_line: u64,
+    pub tags: Vec<String>,
     pub keywords: Vec<String>,
 }
 
@@ -91,6 +94,20 @@ fn make_chunk_id(file_path: &str, start_line: u64) -> String {
 
 /// Strip YAML frontmatter and return (meta, body, frontmatter_line_count).
 fn parse_frontmatter(source: &str) -> (FileMeta, &str, usize) {
+    if !source.starts_with("---") {
+        return (FileMeta::default(), source, 0);
+    }
+
+    // Find the end of the frontmatter block
+    let matter_end = if let Some(end_rel) = source[3..].find("---") {
+        end_rel + 3 + 3 // +3 for the skipped part, +3 for the '---' itself
+    } else {
+        return (FileMeta::default(), source, 0);
+    };
+
+    let (frontmatter, body_ref) = source.split_at(matter_end);
+    let fm_lines = frontmatter.matches('\n').count();
+
     let matter = gray_matter::Matter::<gray_matter::engine::YAML>::new();
     let result = matter.parse(source);
 
@@ -102,15 +119,6 @@ fn parse_frontmatter(source: &str) -> (FileMeta, &str, usize) {
             serde_json::from_value(json).ok()
         })
         .unwrap_or_default();
-
-    // Count the number of lines consumed by frontmatter (including --- delimiters).
-    let body = result.content.as_str();
-    let fm_byte_len = source.len() - body.len();
-    let fm_lines = source[..fm_byte_len].matches('\n').count();
-
-    // We need to return a reference into the original source.
-    // The body starts after the frontmatter bytes.
-    let body_ref = &source[fm_byte_len..];
 
     (meta, body_ref, fm_lines)
 }
@@ -196,6 +204,7 @@ pub fn parse_content(source: &str, file_path_str: &str) -> Result<ParseResult> {
                         end_byte,
                         &line_starts,
                         &meta.tags,
+                        &meta.keywords,
                     );
                     current_content.clear();
                     current_start_byte = None;
@@ -251,6 +260,7 @@ pub fn parse_content(source: &str, file_path_str: &str) -> Result<ParseResult> {
             end_byte,
             &line_starts,
             &meta.tags,
+            &meta.keywords,
         );
     }
 
@@ -265,7 +275,8 @@ pub fn parse_content(source: &str, file_path_str: &str) -> Result<ParseResult> {
             content: body.to_string(),
             start_line,
             end_line,
-            keywords: meta.tags.clone(),
+            tags: meta.tags.clone(),
+            keywords: meta.keywords.clone(),
         });
     }
 
@@ -283,6 +294,7 @@ fn finalize_chunk(
     end_byte: usize,
     line_starts: &[usize],
     yaml_tags: &[String],
+    yaml_keywords: &[String],
 ) {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -307,7 +319,7 @@ fn finalize_chunk(
     let inline_tags = extract_inline_tags(trimmed);
     let mut all_tags: HashSet<String> = yaml_tags.iter().cloned().collect();
     all_tags.extend(inline_tags);
-    let keywords: Vec<String> = all_tags.into_iter().collect();
+    let tags: Vec<String> = all_tags.into_iter().collect();
 
     chunks.push(Chunk {
         chunk_id: make_chunk_id(file_path_str, start_line),
@@ -316,7 +328,8 @@ fn finalize_chunk(
         content: trimmed.to_string(),
         start_line,
         end_line,
-        keywords,
+        tags,
+        keywords: yaml_keywords.to_vec(),
     });
 }
 

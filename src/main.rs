@@ -10,12 +10,21 @@ use walkdir::WalkDir;
 use larch::config::VaultConfig;
 use larch::{assets, index, mcp, parser, server, watcher};
 
+use larch::utils::is_markdown;
+
 #[derive(Parser)]
 #[command(name = "larch")]
 #[command(about = "Local-first Markdown AI Knowledge Engine", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+// ... helper to init config, index, fields ...
+fn init_context() -> Result<(VaultConfig, tantivy::Index, index::SchemaFields)> {
+    let config = VaultConfig::open(&get_default_vault_dir()?)?;
+    let (tantivy_index, fields) = index::open_or_create(&config.index_dir())?;
+    Ok((config, tantivy_index, fields))
 }
 
 #[derive(Subcommand)]
@@ -35,6 +44,12 @@ enum Commands {
         /// Maximum number of results
         #[arg(short, long, default_value_t = 10)]
         limit: usize,
+        /// Filter by tag
+        #[arg(short, long)]
+        tag: Option<String>,
+        /// Filter by directory
+        #[arg(short, long)]
+        dir: Option<String>,
     },
     /// Retrieve a specific document, optionally specifying start and end lines
     Document {
@@ -46,6 +61,17 @@ enum Commands {
         /// End line (inclusive)
         #[arg(short, long)]
         end_line: Option<usize>,
+    },
+    /// Print the vault directory tree
+    Tree {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Tag operations
+    Tag {
+        #[command(subcommand)]
+        command: TagCommands,
     },
     /// Import file OR directory into vault
     Import {
@@ -72,6 +98,18 @@ enum Commands {
     Reindex,
 }
 
+#[derive(Subcommand)]
+enum TagCommands {
+    /// List all tags or view documents for a specific tag
+    Ls {
+        /// Optional tag to filter by
+        tag: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Setup basic tracing for console out / stderr
@@ -94,8 +132,7 @@ async fn main() -> Result<()> {
             println!("   You can now use `larch import <path>` to add markdown files.");
         }
         Commands::Serve { port } => {
-            let config = VaultConfig::open(&get_default_vault_dir()?)?;
-            let (tantivy_index, fields) = index::open_or_create(&config.index_dir())?;
+            let (config, tantivy_index, fields) = init_context()?;
             let writer = index::create_writer(&tantivy_index)?;
             let writer_arc = Arc::new(Mutex::new(writer));
 
@@ -123,11 +160,17 @@ async fn main() -> Result<()> {
             println!("🚀 Larch server running on http://{}", addr);
             axum::serve(listener, app).await?;
         }
-        Commands::Search { query, limit } => {
-            let config = VaultConfig::open(&get_default_vault_dir()?)?;
-            let (tantivy_index, fields) = index::open_or_create(&config.index_dir())?;
+        Commands::Search { query, limit, tag, dir } => {
+            let (_config, tantivy_index, fields) = init_context()?;
             
-            let results = index::search(&tantivy_index, &fields, query, *limit)?;
+            let results = index::search(
+                &tantivy_index,
+                &fields,
+                query,
+                tag.as_deref(),
+                dir.as_deref(),
+                *limit
+            )?;
             if results.is_empty() {
                 println!("No results found for '{}'", query);
             } else {
@@ -136,13 +179,16 @@ async fn main() -> Result<()> {
                     if !res.title_hierarchy.is_empty() {
                         println!("    \x1b[33m{}\x1b[0m", res.title_hierarchy);
                     }
+                    if !res.tags.is_empty() {
+                        println!("    Tags: {}", res.tags.join(", "));
+                    }
                     println!("    Lines: {}-{}", res.start_line, res.end_line);
                     println!("    {}", res.content_snippet.replace('\n', " "));
                 }
             }
         }
         Commands::Document { path, start_line, end_line } => {
-            let config = VaultConfig::open(&get_default_vault_dir()?)?;
+            let (config, _tantivy_index, _fields) = init_context()?;
             let content = larch::document::read_document_range(
                 &config.vault_root,
                 path,
@@ -151,9 +197,58 @@ async fn main() -> Result<()> {
             )?;
             println!("{}", content);
         }
+        Commands::Tree { json } => {
+            let (config, _tantivy_index, _fields) = init_context()?;
+            let root_node = larch::tree::build_tree(&config.vault_root);
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&root_node)?);
+            } else {
+                larch::tree::print_tree(&root_node, "", true, true);
+            }
+        }
+        Commands::Tag { command } => match command {
+            TagCommands::Ls { tag, json } => {
+                let (_config, tantivy_index, fields) = init_context()?;
+                
+                if let Some(t) = tag {
+                    let paths = larch::tag::get_files_for_tag(&tantivy_index, fields.tags, t)?;
+                    if *json {
+                        println!("{}", serde_json::to_string_pretty(&paths)?);
+                    } else {
+                        println!("Tag: {}", t);
+                        if paths.is_empty() {
+                            println!("  (No documents found)");
+                        } else {
+                            for path in paths {
+                                println!("  - {}", path);
+                            }
+                        }
+                    }
+                } else {
+                    let mut tags: Vec<_> = larch::tag::get_all_tags(&tantivy_index, fields.tags)?.into_iter().collect();
+                    tags.sort_by(|a, b| a.0.cmp(&b.0));
+                    
+                    if *json {
+                        let map: std::collections::HashMap<_, _> = tags.into_iter().collect();
+                        println!("{}", serde_json::to_string_pretty(&map)?);
+                    } else {
+                        if tags.is_empty() {
+                            println!("No tags found.");
+                        } else {
+                            for (t, paths) in tags {
+                                println!("├── {}", t);
+                                for (i, path) in paths.iter().enumerate() {
+                                    let connector = if i == paths.len() - 1 { "└──" } else { "├──" };
+                                    println!("│   {} {}", connector, path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
         Commands::Import { path, move_file, dir } => {
-            let config = VaultConfig::open(&get_default_vault_dir()?)?;
-            let (tantivy_index, fields) = index::open_or_create(&config.index_dir())?;
+            let (config, tantivy_index, fields) = init_context()?;
             let writer = index::create_writer(&tantivy_index)?;
             let writer_arc = Arc::new(Mutex::new(writer));
 
@@ -184,8 +279,7 @@ async fn main() -> Result<()> {
             writer_arc.lock().unwrap().commit()?;
         }
         Commands::Status => {
-            let config = VaultConfig::open(&get_default_vault_dir()?)?;
-            let (tantivy_index, _) = index::open_or_create(&config.index_dir())?;
+            let (config, tantivy_index, _) = init_context()?;
             
             let mut md_count = 0;
             for entry in WalkDir::new(&config.vault_root).into_iter().filter_map(|e| e.ok()) {
@@ -207,7 +301,7 @@ async fn main() -> Result<()> {
         }
         Commands::Logs { follow } => {
             // Simplified log read mechanism (would realistically read from logs_dir files)
-            let config = VaultConfig::open(&get_default_vault_dir()?)?;
+            let (config, _tantivy_index, _fields) = init_context()?;
             let logs_dir = config.logs_dir();
             println!("Logs directory: {}", logs_dir.display());
             if *follow {
@@ -217,11 +311,11 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Mcp => {
-            let config = VaultConfig::open(&get_default_vault_dir()?)?;
+            let (config, _tantivy_index, _fields) = init_context()?;
             mcp::run_stdio_server(config).await?;
         }
         Commands::Reindex => {
-            let config = VaultConfig::open(&get_default_vault_dir()?)?;
+            let (config, _tantivy_index, _fields) = init_context()?;
             let index_dir = config.index_dir();
             
             println!("Clearing old index at {}...", index_dir.display());
@@ -261,12 +355,6 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-fn is_markdown(path: &Path) -> bool {
-    path.extension()
-        .map(|ext| ext == "md" || ext == "markdown")
-        .unwrap_or(false)
 }
 
 fn get_default_vault_dir() -> Result<PathBuf> {

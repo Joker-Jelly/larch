@@ -26,6 +26,13 @@ pub struct AppState {
 pub struct SearchQuery {
     pub query: String,
     pub limit: Option<usize>,
+    pub tag: Option<String>,
+    pub dir: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct TagQuery {
+    pub tag: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -60,7 +67,7 @@ pub struct ImportResponse {
 pub struct DocumentResponse {
     pub path: String,
     pub start_line: usize,
-    pub end_line: usize,
+    pub end_line: Option<usize>,
     pub content: String,
 }
 
@@ -77,6 +84,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/search", get(search_handler))
         .route("/api/v1/document", get(document_handler))
         .route("/api/v1/import", post(import_handler))
+        .route("/api/v1/tree", get(tree_handler))
+        .route("/api/v1/tags", get(tag_handler))
         .with_state(state)
 }
 
@@ -95,7 +104,14 @@ async fn search_handler(
     Query(params): Query<SearchQuery>,
 ) -> Result<Json<Vec<SearchResult>>, (StatusCode, Json<ErrorResponse>)> {
     let limit = params.limit.unwrap_or(10);
-    index::search(&state.index, &state.fields, &params.query, limit)
+    index::search(
+        &state.index,
+        &state.fields,
+        &params.query,
+        params.tag.as_deref(),
+        params.dir.as_deref(),
+        limit,
+    )
         .map(Json)
         .map_err(|e| {
             (
@@ -126,12 +142,11 @@ async fn document_handler(
     })?;
 
     let start = params.start_line.unwrap_or(1).max(1);
-    let end = params.end_line.unwrap_or(0); // Optional placeholder value for the API response
 
     Ok(Json(DocumentResponse {
         path: params.path,
         start_line: start,
-        end_line: end,
+        end_line: params.end_line,
         content,
     }))
 }
@@ -222,4 +237,28 @@ async fn import_handler(
         path: file_path_str,
         chunks_indexed: chunks_count,
     }))
+}
+
+async fn tree_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<crate::tree::TreeNode>, (StatusCode, Json<ErrorResponse>)> {
+    let root = crate::tree::build_tree(&state.config.vault_root);
+    Ok(Json(root))
+}
+
+async fn tag_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<TagQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(t) = params.tag {
+        let paths = crate::tag::get_files_for_tag(&state.index, state.fields.tags, &t).map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() }))
+        })?;
+        Ok(Json(serde_json::json!(paths)))
+    } else {
+        let tags = crate::tag::get_all_tags(&state.index, state.fields.tags).map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() }))
+        })?;
+        Ok(Json(serde_json::json!(tags)))
+    }
 }
