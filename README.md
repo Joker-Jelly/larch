@@ -54,10 +54,27 @@ larch import ~/Documents/MyBrain/
 Quickly verify that your notes are indexed using the CLI:
 ```bash
 larch search "Rust ownership"
+# Filter by specific tag or directory
+larch search "Rust" --tag "programming" --dir "tech/notes"
+
+# Read specific file contents
 larch document inbox/draft.md --start-line 10 --end-line 20
 ```
 
-### 4. Start the Engine (REST API & File Watcher)
+### 4. Explore your Vault
+Larch allows you to easily visualize the structure and tags of your vault:
+```bash
+# View your vault as a directory tree
+larch tree
+
+# View all tags and their associated files
+larch tag ls
+
+# Find files associated with a specific tag
+larch tag ls "architecture"
+```
+
+### 5. Start the Engine (REST API & File Watcher)
 This will start the file watcher (to auto-index new changes) and expose the HTTP API on port `3000`.
 ```bash
 larch serve --port 3000
@@ -78,7 +95,7 @@ cargo build --release
 
 ## 🤖 MCP Integration (Model Context Protocol)
 
-Larch shines when connected to an AI Agent. Larch implements the MCP SDK over `stdio`. 
+Larch is a native MCP server, allowing AI Agents (like Claude or Cursor) to autonomously explore your local knowledge. It implements the MCP SDK over `stdio`.
 
 **To use Larch with Claude Desktop:**
 
@@ -87,13 +104,33 @@ Edit your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "larch": {
-      "command": "/path/to/your/larch",
+      "command": "larch",
       "args": ["mcp"]
     }
   }
 }
 ```
-Now, whenever you ask Claude to "Search my local notes about Rust", it will autonomously query Larch and read specific file chunks into its context window!
+
+### Available MCP Tools:
+- `search`: Search the knowledge base using keywords, with optional `tag` and `dir` filters.
+- `document`: Read precise line ranges from a specific Markdown file.
+- `tree`: Get the complete directory structure of your vault.
+- `tags`: List all tags or find documents associated with a specific tag.
+
+---
+
+## 🌐 REST API Reference
+
+When running `larch serve`, the following endpoints are available (default port `3000`):
+
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/api/v1/search` | `GET` | Full-text search with `query`, `limit`, `tag`, and `dir` params. |
+| `/api/v1/tree` | `GET` | Returns the full vault directory structure as JSON. |
+| `/api/v1/tags` | `GET` | List tags. Use `?tag=name` to get files for a specific tag. |
+| `/api/v1/document` | `GET` | Get file content via `path`, `start_line`, and `end_line`. |
+| `/api/v1/import` | `POST` | Import new content via JSON body `{ filename, content, dir? }`. |
+| `/health` | `GET` | Check server status and vault root location. |
 
 ---
 

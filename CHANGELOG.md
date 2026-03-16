@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-03-16
+
+### Added
+- **Vault Directory Tree (`tree`)**: New CLI command `larch tree` to visualize the entire vault hierarchy as a graphical tree. Also available via MCP (`tree` tool) and REST API (`GET /api/v1/tree`), supporting JSON output (`--json`).
+- **Tag Aggregation (`tag ls`)**: New CLI command `larch tag ls [TAG]` to list all indexed tags and their associated documents, or filter by a specific tag. Available via MCP (`tags` tool) and REST API (`GET /api/v1/tags`).
+- **Advanced Search Filters**: The `search` command now supports `--tag` and `--dir` arguments to narrow down search scopes to specific tags or subdirectories. Fully supported in the REST API and MCP server.
+
+### Changed
+- **Index Schema Optimization**: Introduced two new indexing fields: `tags` (Multivalued Fast String) and `dirs` (Facet). `keywords` is now purely reserved for explicit YAML Frontmatter meta definitions.
+- **Search Weighting Strategy**: Adjusted search boosting to favor metadata over raw text: `keywords` (3.0) > `title_hierarchy` (2.0) > `content` (1.0).
+- **Search Snippets (Highlighting)**: Upgraded the search result preview from basic truncation to dynamic BM25 context snippets (Tantivy `SnippetGenerator`), elegantly highlighting matching terms in terminal output.
+- **Tag Reading Performance**: `tag ls` queries now directly traverse the high-speed Columnar/Fast Fields (`TermDictionary`) rather than full document deserialization, vastly improving speed on large vaults.
+
+### Fixed
+- Fixed an edge-case in Markdown parsing where the first characters of the document (e.g., `# ` from a heading) could be inadvertently stripped if the file lacked YAML frontmatter.
+- Escaped HTML entities (`&lt;`, `&gt;`, `&amp;`, etc.) are now correctly decoded in the CLI search output preview.
+
+
+
+
 ## [0.1.0] - 2026-03-15
 
 ### Added
