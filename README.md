@@ -1,5 +1,7 @@
 # Larch 🌲
 
+**[English](README.md) | [中文](README_CN.md)**
+
 **Local-first Markdown AI Knowledge Engine.**
 
 Larch is a blazingly fast, lightweight, and local-first knowledge base engine designed specifically to serve your Markdown notes to AI Agents and Large Language Models (LLMs) via the **Model Context Protocol (MCP)** and a standard REST API.
