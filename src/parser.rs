@@ -4,6 +4,12 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::LazyLock;
+
+// ── Compiled regexes (built once) ─────────────────────────────────
+
+static INLINE_TAG_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:^|\s)#([^\s#]+)").unwrap());
 
 // ── Data structures ────────────────────────────────────────────────
 
@@ -74,8 +80,8 @@ fn heading_level_depth(level: HeadingLevel) -> usize {
 
 /// Extract inline hashtags from content (e.g. `#性能优化`).
 fn extract_inline_tags(content: &str) -> Vec<String> {
-    let re = Regex::new(r"(?:^|\s)#([^\s#]+)").unwrap();
-    re.captures_iter(content)
+    INLINE_TAG_RE
+        .captures_iter(content)
         .map(|cap| cap[1].to_string())
         .collect()
 }
@@ -319,7 +325,8 @@ fn finalize_chunk(
     let inline_tags = extract_inline_tags(trimmed);
     let mut all_tags: HashSet<String> = yaml_tags.iter().cloned().collect();
     all_tags.extend(inline_tags);
-    let tags: Vec<String> = all_tags.into_iter().collect();
+    let mut tags: Vec<String> = all_tags.into_iter().collect();
+    tags.sort();
 
     chunks.push(Chunk {
         chunk_id: make_chunk_id(file_path_str, start_line),

@@ -71,13 +71,13 @@ impl McpState {
         Parameters(args): Parameters<TagArgs>,
     ) -> Result<String, String> {
         if let Some(t) = args.tag {
-            let paths = crate::tag::get_files_for_tag(&self.index, self.fields.tags, &t)
+            let paths = crate::tag::get_files_for_tag(&self.index, &self.fields, &t)
                 .map_err(|e| e.to_string())?;
             let json = serde_json::to_string_pretty(&paths)
                 .map_err(|e| e.to_string())?;
             Ok(json)
         } else {
-            let tags = crate::tag::get_all_tags(&self.index, self.fields.tags)
+            let tags = crate::tag::get_all_tags(&self.index, &self.fields)
                 .map_err(|e| e.to_string())?;
             let json = serde_json::to_string_pretty(&tags)
                 .map_err(|e| e.to_string())?;
@@ -107,7 +107,7 @@ impl McpState {
         &self,
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<String, String> {
-        let limit = args.limit.unwrap_or(10);
+        let limit = args.limit.unwrap_or(10).min(1000);
         let searcher = self.reader.searcher();
         let results = index::search(
             &searcher,
@@ -151,65 +151,20 @@ impl McpState {
         &self,
         Parameters(args): Parameters<ImportArgs>,
     ) -> Result<String, String> {
-        let target_dir = if let Some(ref dir) = args.dir {
-            self.config.vault_root.join(dir)
-        } else {
-            self.config.vault_root.clone()
-        };
-
-        std::fs::create_dir_all(&target_dir)
-            .map_err(|e| format!("Creating directory: {}", e))?;
-
-        let file_path = target_dir.join(&args.filename);
-
-        // Prevent path traversal outside vault
-        let canonical_vault = std::fs::canonicalize(&self.config.vault_root)
-            .map_err(|e| format!("Resolving vault root: {}", e))?;
-        let canonical_file = if file_path.exists() {
-            std::fs::canonicalize(&file_path).map_err(|e| format!("Resolving file path: {}", e))?
-        } else {
-            // For new files, canonicalize the parent then append filename
-            let parent = file_path.parent().unwrap_or(&target_dir);
-            std::fs::canonicalize(parent)
-                .map_err(|e| format!("Resolving parent dir: {}", e))?
-                .join(file_path.file_name().unwrap_or_default())
-        };
-        if !canonical_file.starts_with(&canonical_vault) {
-            return Err("Path escapes vault boundary".to_string());
-        }
-
-        // Process assets in the content (rewrite paths)
-        let processed = crate::assets::process_assets(
+        let result = crate::import::import_content(
             &args.content,
-            &target_dir,
-            &self.config.vault_root,
-            &target_dir,
+            &args.filename,
+            args.dir.as_deref(),
+            &self.config,
+            &self.fields,
+            &self.writer,
         )
-        .map_err(|e| format!("Processing assets: {}", e))?;
-
-        std::fs::write(&file_path, &processed)
-            .map_err(|e| format!("Writing file: {}", e))?;
-
-        // Parse and index using relative paths
-        let file_path_str = file_path
-            .strip_prefix(&self.config.vault_root)
-            .unwrap_or(&file_path)
-            .to_string_lossy()
-            .to_string();
-        let result = crate::parser::parse_content(&processed, &file_path_str)
-            .map_err(|e| format!("Parsing: {}", e))?;
-
-        let chunks_count = result.chunks.len();
-        let mut writer = self.writer.lock().unwrap();
-        index::index_file(&writer, &self.fields, &file_path_str, &result.chunks, &result.meta)
-            .map_err(|e| format!("Indexing: {}", e))?;
-        writer.commit()
-            .map_err(|e| format!("Commit: {}", e))?;
+        .map_err(|e| e.to_string())?;
 
         let response = serde_json::json!({
             "success": true,
-            "path": file_path_str,
-            "chunks_indexed": chunks_count,
+            "path": result.rel_path,
+            "chunks_indexed": result.chunks_indexed,
         });
         serde_json::to_string_pretty(&response)
             .map_err(|e| e.to_string())

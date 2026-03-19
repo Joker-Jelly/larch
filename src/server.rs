@@ -104,7 +104,7 @@ async fn search_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchQuery>,
 ) -> Result<Json<Vec<SearchResult>>, (StatusCode, Json<ErrorResponse>)> {
-    let limit = params.limit.unwrap_or(10);
+    let limit = params.limit.unwrap_or(10).min(1000);
     let searcher = state.reader.searcher();
     index::search(
         &searcher,
@@ -158,103 +158,42 @@ async fn import_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ImportBody>,
 ) -> Result<Json<ImportResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let target_dir = if let Some(ref dir) = body.dir {
-        state.config.vault_root.join(dir)
-    } else {
-        state.config.vault_root.clone()
-    };
+    let config = state.config.clone();
+    let fields = state.fields.clone();
+    let writer = Arc::clone(&state.writer);
 
-    std::fs::create_dir_all(&target_dir).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Creating directory: {}", e),
-            }),
+    let result = tokio::task::spawn_blocking(move || {
+        crate::import::import_content(
+            &body.content,
+            &body.filename,
+            body.dir.as_deref(),
+            &config,
+            &fields,
+            &writer,
         )
-    })?;
-
-    let file_path = target_dir.join(&body.filename);
-
-    // Prevent path traversal outside vault
-    let canonical_vault = std::fs::canonicalize(&state.config.vault_root).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("Resolving vault root: {}", e) }))
-    })?;
-    let canonical_file = if file_path.exists() {
-        std::fs::canonicalize(&file_path)
-    } else {
-        let parent = file_path.parent().unwrap_or(&target_dir);
-        std::fs::canonicalize(parent).map(|p| p.join(file_path.file_name().unwrap_or_default()))
-    }.map_err(|e| {
-        (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: format!("Resolving file path: {}", e) }))
-    })?;
-    if !canonical_file.starts_with(&canonical_vault) {
-        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Path escapes vault boundary".into() })));
-    }
-
-    // Process assets in the content (rewrite paths)
-    let processed = crate::assets::process_assets(
-        &body.content,
-        &target_dir, // source_dir for relative asset resolution
-        &state.config.vault_root,
-        &target_dir,
-    )
+    })
+    .await
     .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("Processing assets: {}", e),
+                error: format!("Task join error: {}", e),
             }),
         )
-    })?;
-
-    std::fs::write(&file_path, &processed).map_err(|e| {
+    })?
+    .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("Writing file: {}", e),
-            }),
-        )
-    })?;
-
-    // Parse and index using relative paths
-    let file_path_str = file_path
-        .strip_prefix(&state.config.vault_root)
-        .unwrap_or(&file_path)
-        .to_string_lossy()
-        .to_string();
-    let result = crate::parser::parse_content(&processed, &file_path_str).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Parsing: {}", e),
-            }),
-        )
-    })?;
-
-    let chunks_count = result.chunks.len();
-    let mut writer = state.writer.lock().unwrap();
-    index::index_file(&writer, &state.fields, &file_path_str, &result.chunks, &result.meta)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Indexing: {}", e),
-                }),
-            )
-        })?;
-    writer.commit().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Commit: {}", e),
+                error: e.to_string(),
             }),
         )
     })?;
 
     Ok(Json(ImportResponse {
         success: true,
-        path: file_path_str,
-        chunks_indexed: chunks_count,
+        path: result.rel_path,
+        chunks_indexed: result.chunks_indexed,
     }))
 }
 
@@ -270,12 +209,12 @@ async fn tag_handler(
     Query(params): Query<TagQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     if let Some(t) = params.tag {
-        let paths = crate::tag::get_files_for_tag(&state.index, state.fields.tags, &t).map_err(|e| {
+        let paths = crate::tag::get_files_for_tag(&state.index, &state.fields, &t).map_err(|e| {
             (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() }))
         })?;
         Ok(Json(serde_json::json!(paths)))
     } else {
-        let tags = crate::tag::get_all_tags(&state.index, state.fields.tags).map_err(|e| {
+        let tags = crate::tag::get_all_tags(&state.index, &state.fields).map_err(|e| {
             (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() }))
         })?;
         Ok(Json(serde_json::json!(tags)))

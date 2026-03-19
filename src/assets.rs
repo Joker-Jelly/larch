@@ -3,6 +3,11 @@ use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::LazyLock;
+
+/// Regex for ![alt](path) and [text](path) — avoids URLs (http/https)
+static MD_LINK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(!?\[[^\]]*\])\(([^)]+)\)").unwrap());
 
 /// Process a markdown file's content, copying any locally-referenced assets
 /// into `<vault_root>/assets/` with hash-based filenames, then rewriting the
@@ -18,12 +23,9 @@ pub fn process_assets(
     let assets_dir = vault_root.join("assets");
     std::fs::create_dir_all(&assets_dir).context("creating assets dir")?;
 
-    // Regex for ![alt](path) and [text](path) — avoids URLs (http/https)
-    let re = Regex::new(r"(!?\[[^\]]*\])\(([^)]+)\)").unwrap();
-
     let mut replacements: HashMap<String, String> = HashMap::new();
 
-    for cap in re.captures_iter(md_content) {
+    for cap in MD_LINK_RE.captures_iter(md_content) {
         let original_path_str = cap[2].trim();
 
         // Skip URLs and already-vault-relative paths

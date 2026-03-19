@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -8,7 +8,7 @@ use tracing_subscriber::FmtSubscriber;
 use walkdir::WalkDir;
 
 use larch::config::{self as vault_config, VaultConfig};
-use larch::{assets, index, mcp, parser, server, watcher};
+use larch::{import, index, mcp, parser, server, watcher};
 
 use larch::utils::is_markdown;
 
@@ -153,12 +153,11 @@ async fn main() -> Result<()> {
             let rx = watcher::start_watcher(&config)?;
             
             // Spawn watcher event loop
-            let index_clone = tantivy_index.clone();
             let fields_clone = fields.clone();
             let writer_clone = Arc::clone(&writer_arc);
             let config_clone = config.clone();
             tokio::spawn(async move {
-                watcher::process_events(rx, index_clone, fields_clone, writer_clone, config_clone).await;
+                watcher::process_events(rx, fields_clone, writer_clone, config_clone).await;
             });
 
             // Start API server
@@ -229,7 +228,7 @@ async fn main() -> Result<()> {
                 let (_config, tantivy_index, fields) = init_context()?;
                 
                 if let Some(t) = tag {
-                    let paths = larch::tag::get_files_for_tag(&tantivy_index, fields.tags, t)?;
+                    let paths = larch::tag::get_files_for_tag(&tantivy_index, &fields, t)?;
                     if *json {
                         println!("{}", serde_json::to_string_pretty(&paths)?);
                     } else {
@@ -243,22 +242,20 @@ async fn main() -> Result<()> {
                         }
                     }
                 } else {
-                    let mut tags: Vec<_> = larch::tag::get_all_tags(&tantivy_index, fields.tags)?.into_iter().collect();
+                    let mut tags: Vec<_> = larch::tag::get_all_tags(&tantivy_index, &fields)?.into_iter().collect();
                     tags.sort_by(|a, b| a.0.cmp(&b.0));
                     
                     if *json {
                         let map: std::collections::HashMap<_, _> = tags.into_iter().collect();
                         println!("{}", serde_json::to_string_pretty(&map)?);
+                    } else if tags.is_empty() {
+                        println!("No tags found.");
                     } else {
-                        if tags.is_empty() {
-                            println!("No tags found.");
-                        } else {
-                            for (t, paths) in tags {
-                                println!("├── {}", t);
-                                for (i, path) in paths.iter().enumerate() {
-                                    let connector = if i == paths.len() - 1 { "└──" } else { "├──" };
-                                    println!("│   {} {}", connector, path);
-                                }
+                        for (t, paths) in tags {
+                            println!("├── {}", t);
+                            for (i, path) in paths.iter().enumerate() {
+                                let connector = if i == paths.len() - 1 { "└──" } else { "├──" };
+                                println!("│   {} {}", connector, path);
                             }
                         }
                     }
@@ -278,23 +275,22 @@ async fn main() -> Result<()> {
             if source_path.is_dir() {
                 let mut imported = 0;
                 for entry in WalkDir::new(&source_path).into_iter().filter_map(|e| e.ok()) {
-                    let path = entry.path();
-                    if path.is_file() && is_markdown(path) {
-                        import_single_file(path, &source_path, &target_md_base, &config, &fields, &writer_arc, *move_file)?;
+                    let p = entry.path();
+                    if p.is_file() && is_markdown(p) {
+                        import::import_file_from_disk(p, &source_path, &target_md_base, &config, &fields, &writer_arc, *move_file)?;
                         imported += 1;
                     }
                 }
+                writer_arc.lock().unwrap_or_else(|e| e.into_inner()).commit()?;
                 println!("✅ Imported {} markdown files.", imported);
             } else if source_path.is_file() && is_markdown(&source_path) {
-                // If it's a single file, the base relative dir is just its parent
                 let source_dir = source_path.parent().unwrap_or(Path::new(""));
-                import_single_file(&source_path, source_dir, &target_md_base, &config, &fields, &writer_arc, *move_file)?;
+                import::import_file_from_disk(&source_path, source_dir, &target_md_base, &config, &fields, &writer_arc, *move_file)?;
+                writer_arc.lock().unwrap_or_else(|e| e.into_inner()).commit()?;
                 println!("✅ Imported {}", source_path.file_name().unwrap_or_default().to_string_lossy());
             } else {
                 anyhow::bail!("Path is neither a directory nor a markdown file.");
             }
-            
-            writer_arc.lock().unwrap().commit()?;
         }
         Commands::Status => {
             let (config, tantivy_index, _) = init_context()?;
@@ -359,7 +355,7 @@ async fn main() -> Result<()> {
                         .to_string();
                     
                     if let Ok(result) = parser::parse_content(&source, &rel_path_str) {
-                         let w = writer_arc.lock().unwrap();
+                         let w = writer_arc.lock().unwrap_or_else(|e| e.into_inner());
                          if let Err(e) = index::index_file(&w, &fields, &rel_path_str, &result.chunks, &result.meta) {
                              eprintln!("Index error for {}: {}", rel_path_str, e);
                          }
@@ -367,59 +363,10 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            writer_arc.lock().unwrap().commit()?;
+            writer_arc.lock().unwrap_or_else(|e| e.into_inner()).commit()?;
             println!("✅ Successfully re-indexed {} markdown files.", count);
         }
     }
-
-    Ok(())
-}
-
-fn import_single_file(
-    file_path: &Path,
-    source_base_dir: &Path,
-    target_md_base: &Path,
-    config: &VaultConfig,
-    fields: &index::SchemaFields,
-    writer_arc: &Arc<Mutex<tantivy::IndexWriter>>,
-    move_file: bool,
-) -> Result<()> {
-    // Determine relative path structure
-    let rel_path = file_path.strip_prefix(source_base_dir).unwrap_or(Path::new(file_path.file_name().unwrap()));
-    let target_file_path = target_md_base.join(rel_path);
-    
-    if let Some(parent) = target_file_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let content = std::fs::read_to_string(file_path)
-        .with_context(|| format!("Reading {}", file_path.display()))?;
-
-    // Process assets (copy/hash/rewrite)
-    let processed_content = assets::process_assets(
-        &content,
-        file_path.parent().unwrap_or(Path::new("")),
-        &config.vault_root,
-        target_file_path.parent().unwrap_or(Path::new("")),
-    )?;
-
-    std::fs::write(&target_file_path, &processed_content)
-        .with_context(|| format!("Writing to {}", target_file_path.display()))?;
-
-    if move_file {
-        let _ = std::fs::remove_file(file_path);
-    }
-
-    // Parse and Index (using relative paths for clean CLI output)
-    let file_path_str = target_file_path
-        .strip_prefix(&config.vault_root)
-        .unwrap_or(&target_file_path)
-        .to_string_lossy()
-        .to_string();
-    let result = parser::parse_content(&processed_content, &file_path_str)?;
-    
-    let writer = writer_arc.lock().unwrap();
-    index::index_file(&writer, fields, &file_path_str, &result.chunks, &result.meta)?;
 
     Ok(())
 }

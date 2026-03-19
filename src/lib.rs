@@ -1,6 +1,7 @@
 pub mod assets;
 pub mod config;
 pub mod document;
+pub mod import;
 pub mod index;
 pub mod mcp;
 pub mod parser;
