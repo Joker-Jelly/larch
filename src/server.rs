@@ -18,6 +18,7 @@ pub struct AppState {
     pub fields: SchemaFields,
     pub config: VaultConfig,
     pub writer: Arc<Mutex<tantivy::IndexWriter>>,
+    pub reader: tantivy::IndexReader,
 }
 
 // ── Query / body types ─────────────────────────────────────────────
@@ -104,13 +105,15 @@ async fn search_handler(
     Query(params): Query<SearchQuery>,
 ) -> Result<Json<Vec<SearchResult>>, (StatusCode, Json<ErrorResponse>)> {
     let limit = params.limit.unwrap_or(10);
+    let searcher = state.reader.searcher();
     index::search(
-        &state.index,
+        &searcher,
         &state.fields,
         &params.query,
         params.tag.as_deref(),
         params.dir.as_deref(),
         limit,
+        true, // plain snippets for JSON API
     )
         .map(Json)
         .map_err(|e| {
@@ -171,6 +174,22 @@ async fn import_handler(
     })?;
 
     let file_path = target_dir.join(&body.filename);
+
+    // Prevent path traversal outside vault
+    let canonical_vault = std::fs::canonicalize(&state.config.vault_root).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: format!("Resolving vault root: {}", e) }))
+    })?;
+    let canonical_file = if file_path.exists() {
+        std::fs::canonicalize(&file_path)
+    } else {
+        let parent = file_path.parent().unwrap_or(&target_dir);
+        std::fs::canonicalize(parent).map(|p| p.join(file_path.file_name().unwrap_or_default()))
+    }.map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: format!("Resolving file path: {}", e) }))
+    })?;
+    if !canonical_file.starts_with(&canonical_vault) {
+        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Path escapes vault boundary".into() })));
+    }
 
     // Process assets in the content (rewrite paths)
     let processed = crate::assets::process_assets(

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -7,7 +7,7 @@ use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 use walkdir::WalkDir;
 
-use larch::config::VaultConfig;
+use larch::config::{self as vault_config, VaultConfig};
 use larch::{assets, index, mcp, parser, server, watcher};
 
 use larch::utils::is_markdown;
@@ -22,7 +22,8 @@ struct Cli {
 
 // ... helper to init config, index, fields ...
 fn init_context() -> Result<(VaultConfig, tantivy::Index, index::SchemaFields)> {
-    let config = VaultConfig::open(&get_default_vault_dir()?)?;
+    let vault_dir = vault_config::get_vault_dir()?;
+    let config = VaultConfig::open(&vault_dir)?;
     let (tantivy_index, fields) = index::open_or_create(&config.index_dir())?;
     Ok((config, tantivy_index, fields))
 }
@@ -30,7 +31,10 @@ fn init_context() -> Result<(VaultConfig, tantivy::Index, index::SchemaFields)> 
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize vault (create .larch/, assets/, config). NO indexing.
-    Init,
+    Init {
+        /// Optional path for the vault directory (default: ~/.larch-vault)
+        path: Option<PathBuf>,
+    },
     /// Start watcher + REST API
     Serve {
         /// Port to run the REST API on
@@ -125,14 +129,24 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Init => {
-            let dir = get_default_vault_dir()?;
+        Commands::Init { path } => {
+            let dir = match path {
+                Some(p) => std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()),
+                None => vault_config::default_vault_dir()?,
+            };
             let config = VaultConfig::init(&dir)?;
+
+            // Save to global config
+            vault_config::save_global_config(&vault_config::GlobalConfig {
+                vault_path: config.vault_root.clone(),
+            })?;
+
             println!("✅ Initialized Larch vault at {}", config.vault_root.display());
             println!("   You can now use `larch import <path>` to add markdown files.");
         }
         Commands::Serve { port } => {
             let (config, tantivy_index, fields) = init_context()?;
+            let reader = index::create_reader(&tantivy_index)?;
             let writer = index::create_writer(&tantivy_index)?;
             let writer_arc = Arc::new(Mutex::new(writer));
 
@@ -153,6 +167,7 @@ async fn main() -> Result<()> {
                 fields,
                 config: config.clone(),
                 writer: writer_arc,
+                reader,
             });
             let app = server::build_router(state);
             let addr = format!("0.0.0.0:{}", port);
@@ -162,14 +177,17 @@ async fn main() -> Result<()> {
         }
         Commands::Search { query, limit, tag, dir } => {
             let (_config, tantivy_index, fields) = init_context()?;
-            
+            let reader = index::create_reader(&tantivy_index)?;
+            let searcher = reader.searcher();
+
             let results = index::search(
-                &tantivy_index,
+                &searcher,
                 &fields,
                 query,
                 tag.as_deref(),
                 dir.as_deref(),
-                *limit
+                *limit,
+                false, // ANSI snippets for CLI
             )?;
             if results.is_empty() {
                 println!("No results found for '{}'", query);
@@ -311,8 +329,8 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Mcp => {
-            let (config, _tantivy_index, _fields) = init_context()?;
-            mcp::run_stdio_server(config).await?;
+            let (config, tantivy_index, fields) = init_context()?;
+            mcp::run_stdio_server(config, tantivy_index, fields).await?;
         }
         Commands::Reindex => {
             let (config, _tantivy_index, _fields) = init_context()?;
@@ -355,11 +373,6 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-fn get_default_vault_dir() -> Result<PathBuf> {
-    let home_dir = dirs::home_dir().ok_or_else(|| anyhow!("Could not determine home directory"))?;
-    Ok(home_dir.join(".larch"))
 }
 
 fn import_single_file(

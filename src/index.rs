@@ -3,7 +3,7 @@ use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
-use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument};
+use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Searcher, TantivyDocument};
 
 use crate::parser::{Chunk, FileMeta};
 
@@ -167,6 +167,15 @@ pub fn create_writer(index: &Index) -> Result<IndexWriter> {
         .context("creating index writer")
 }
 
+/// Create a reusable IndexReader with auto-reload on commit.
+pub fn create_reader(index: &Index) -> Result<IndexReader> {
+    index
+        .reader_builder()
+        .reload_policy(ReloadPolicy::OnCommitWithDelay)
+        .try_into()
+        .context("creating index reader")
+}
+
 /// Index (or re-index) a single file's chunks.
 /// Deletes any previously-indexed chunks for the same `file_path` first.
 pub fn index_file(
@@ -227,24 +236,20 @@ pub fn remove_file(writer: &IndexWriter, fields: &SchemaFields, file_path: &str)
 }
 
 /// Execute a search query and return results.
+///
+/// When `plain_snippet` is true, highlighted snippets use `<b>` HTML tags
+/// instead of ANSI escape codes (suitable for JSON API / MCP responses).
 pub fn search(
-    index: &Index,
+    searcher: &Searcher,
     fields: &SchemaFields,
     query_str: &str,
     tag: Option<&str>,
     dir: Option<&str>,
     limit: usize,
+    plain_snippet: bool,
 ) -> Result<Vec<SearchResult>> {
-    let reader = index
-        .reader_builder()
-        .reload_policy(ReloadPolicy::OnCommitWithDelay)
-        .try_into()
-        .context("creating reader")?;
-
-    let searcher = reader.searcher();
-
     let mut query_parser = QueryParser::for_index(
-        index,
+        searcher.index(),
         vec![fields.content, fields.title_hierarchy, fields.keywords],
     );
     query_parser.set_field_boost(fields.keywords, 3.0);
@@ -289,8 +294,8 @@ pub fn search(
         .search(&final_query, &TopDocs::with_limit(limit))
         .context("executing search")?;
 
-    let snippet_generator = tantivy::SnippetGenerator::create(&searcher, &*parsed_query, fields.content)?;
-    
+    let snippet_generator = tantivy::SnippetGenerator::create(searcher, &*parsed_query, fields.content)?;
+
     let mut results = Vec::new();
 
     for (score, doc_addr) in top_docs {
@@ -317,7 +322,7 @@ pub fn search(
 
         // Build a content snippet
         let snippet = snippet_generator.snippet_from_doc(&doc);
-        
+
         let content_snippet = if snippet.is_empty() {
             let full_content = get_text(fields.content);
             if full_content.chars().count() > 200 {
@@ -326,14 +331,22 @@ pub fn search(
             } else {
                 full_content
             }
-        } else {
-            // The easiest and safest way is to use `to_html` and replace the tags with ANSI codes
-            // Because Tantivy correctly handles byte boundaries for multi-byte UTF-8 chars in `to_html`.
-            // We also decode basic HTML entities escaped by Tantivy's encode_minimal.
+        } else if plain_snippet {
+            // Use plain text with <b> tags for JSON/API/MCP responses
             snippet
                 .to_html()
-                .replace("<b>", "\x1b[1;31m")  // Bold Red for highlight
-                .replace("</b>", "\x1b[0m")    // Reset
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&")
+                .replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replace('\n', " ")
+        } else {
+            // Use ANSI codes for terminal/CLI output
+            snippet
+                .to_html()
+                .replace("<b>", "\x1b[1;31m")
+                .replace("</b>", "\x1b[0m")
                 .replace("&lt;", "<")
                 .replace("&gt;", ">")
                 .replace("&amp;", "&")
@@ -423,16 +436,18 @@ mod tests {
         writer.commit().unwrap();
 
         // Search for Chinese content
-        let results = search(&index, &fields, "并发", None, None, 10).unwrap();
+        let reader = create_reader(&index).unwrap();
+        let searcher = reader.searcher();
+        let results = search(&searcher, &fields, "并发", None, None, 10, false).unwrap();
         assert!(!results.is_empty(), "Should find Chinese content");
         assert_eq!(results[0].file_path, "test.md");
 
         // Search for English content
-        let results = search(&index, &fields, "performance", None, None, 10).unwrap();
+        let results = search(&searcher, &fields, "performance", None, None, 10, false).unwrap();
         assert!(!results.is_empty(), "Should find English content");
 
         // Search by tag
-        let results = search(&index, &fields, "performance", Some("性能"), None, 10).unwrap();
+        let results = search(&searcher, &fields, "performance", Some("性能"), None, 10, false).unwrap();
         assert!(!results.is_empty(), "Should find content with tag");
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -455,7 +470,8 @@ mod tests {
         remove_file(&writer, &fields, "test.md");
         writer.commit().unwrap();
 
-        let results = search(&index, &fields, "并发", None, None, 10).unwrap();
+        let reader = create_reader(&index).unwrap();
+        let results = search(&reader.searcher(), &fields, "并发", None, None, 10, false).unwrap();
         assert!(results.is_empty(), "Should be empty after removal");
 
         let _ = std::fs::remove_dir_all(&tmp);
