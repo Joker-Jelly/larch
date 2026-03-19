@@ -110,7 +110,16 @@ fn build_schema() -> (Schema, SchemaFields) {
             .set_fast(None),
     );
     let dirs = builder.add_facet_field(F_DIRS, INDEXED);
-    let summary = builder.add_text_field(F_SUMMARY, STORED);
+    let summary = builder.add_text_field(
+        F_SUMMARY,
+        TextOptions::default()
+            .set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer(JIEBA_TOKENIZER)
+                    .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+            )
+            .set_stored(),
+    );
     let version = builder.add_text_field(F_VERSION, STRING | STORED);
     let created_at = builder.add_text_field(
         F_CREATED_AT,
@@ -235,6 +244,12 @@ pub fn remove_file(writer: &IndexWriter, fields: &SchemaFields, file_path: &str)
     writer.delete_term(term);
 }
 
+/// Delete all documents from the index. Caller must commit afterward.
+pub fn delete_all_documents(writer: &IndexWriter) -> Result<()> {
+    writer.delete_all_documents()?;
+    Ok(())
+}
+
 /// Execute a search query and return results.
 ///
 /// When `plain_snippet` is true, highlighted snippets use `<b>` HTML tags
@@ -250,10 +265,11 @@ pub fn search(
 ) -> Result<Vec<SearchResult>> {
     let mut query_parser = QueryParser::for_index(
         searcher.index(),
-        vec![fields.content, fields.title_hierarchy, fields.keywords],
+        vec![fields.content, fields.title_hierarchy, fields.keywords, fields.summary],
     );
-    query_parser.set_field_boost(fields.keywords, 3.0);
+    query_parser.set_field_boost(fields.keywords, 2.5);
     query_parser.set_field_boost(fields.title_hierarchy, 2.0);
+    query_parser.set_field_boost(fields.summary, 1.5);
     query_parser.set_field_boost(fields.content, 1.0);
 
     let parsed_query = query_parser

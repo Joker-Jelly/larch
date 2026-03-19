@@ -181,22 +181,44 @@ impl ServerHandler for McpState {
 
 // ── Server startup ─────────────────────────────────────────────────
 
+/// Create an `McpState` from shared resources (for embedding in serve).
+pub fn create_state(
+    index: Arc<tantivy::Index>,
+    fields: SchemaFields,
+    config: VaultConfig,
+    reader: Arc<tantivy::IndexReader>,
+    writer: Arc<Mutex<tantivy::IndexWriter>>,
+) -> McpState {
+    McpState {
+        index,
+        fields,
+        config,
+        reader,
+        writer,
+        tool_router: McpState::tool_router(),
+    }
+}
+
+/// Run MCP stdio server with its own reader/writer (standalone mode).
 pub async fn run_stdio_server(config: VaultConfig, index: tantivy::Index, fields: index::SchemaFields) -> anyhow::Result<()> {
     let reader = index::create_reader(&index)?;
     let writer = index::create_writer(&index)?;
 
-    let state = McpState {
-        index: Arc::new(index),
+    let state = create_state(
+        Arc::new(index),
         fields,
         config,
-        reader: Arc::new(reader),
-        writer: Arc::new(Mutex::new(writer)),
-        tool_router: McpState::tool_router(),
-    };
+        Arc::new(reader),
+        Arc::new(Mutex::new(writer)),
+    );
 
+    run_stdio_transport(state).await
+}
+
+/// Run the MCP stdio transport with a pre-built state.
+pub async fn run_stdio_transport(state: McpState) -> anyhow::Result<()> {
     let transport = (tokio::io::stdin(), tokio::io::stdout());
     let server = state.serve(transport).await?;
     let _ = server.waiting().await;
-
     Ok(())
 }

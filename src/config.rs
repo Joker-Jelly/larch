@@ -118,6 +118,10 @@ impl VaultConfig {
         self.vault_root.join("assets")
     }
 
+    pub fn serve_lock_path(&self) -> std::path::PathBuf {
+        self.larch_dir().join("serve.lock")
+    }
+
     fn marker_path(&self) -> PathBuf {
         self.larch_dir().join(VAULT_MARKER)
     }

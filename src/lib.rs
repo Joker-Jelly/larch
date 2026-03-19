@@ -1,8 +1,10 @@
 pub mod assets;
+pub mod client;
 pub mod config;
 pub mod document;
 pub mod import;
 pub mod index;
+pub mod lockfile;
 pub mod mcp;
 pub mod parser;
 pub mod server;

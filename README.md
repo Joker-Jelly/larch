@@ -79,7 +79,20 @@ This will start the file watcher (to auto-index new changes) and expose the HTTP
 ```bash
 larch serve --port 3000
 ```
+
+To also enable MCP over stdin/stdout (recommended for AI agent integration):
+```bash
+larch serve --port 3000 --mcp
+```
+
 *Tip: Run this in the background using `nohup larch serve > ~/.larch/logs/larch.log 2>&1 &` or manage it via `systemd`/`pm2`.*
+
+### 6. Rebuild Index
+If your index becomes stale or after upgrading Larch, rebuild it:
+```bash
+larch reindex
+```
+*Note: If `larch serve` is running, the reindex is automatically delegated to the server.*
 
 ## 🛠️ Development (Build from Source)
 
@@ -97,7 +110,7 @@ cargo build --release
 
 Larch is a native MCP server, allowing AI Agents (like Claude or Cursor) to autonomously explore your local knowledge. It implements the MCP SDK over `stdio`.
 
-**To use Larch with Claude Desktop:**
+**Recommended: Use `larch serve --mcp`** to run both the REST API and MCP server in a single process with a shared write lock:
 
 Edit your `claude_desktop_config.json`:
 ```json
@@ -105,17 +118,20 @@ Edit your `claude_desktop_config.json`:
   "mcpServers": {
     "larch": {
       "command": "larch",
-      "args": ["mcp"]
+      "args": ["serve", "--mcp"]
     }
   }
 }
 ```
+
+Alternatively, `larch mcp` still works as a standalone MCP server, but running it alongside `larch serve` may cause write conflicts.
 
 ### Available MCP Tools:
 - `search`: Search the knowledge base using keywords, with optional `tag` and `dir` filters.
 - `document`: Read precise line ranges from a specific Markdown file.
 - `tree`: Get the complete directory structure of your vault.
 - `tags`: List all tags or find documents associated with a specific tag.
+- `import`: Import markdown content into the vault with automatic asset processing and indexing.
 
 ---
 
@@ -130,6 +146,8 @@ When running `larch serve`, the following endpoints are available (default port 
 | `/api/v1/tags` | `GET` | List tags. Use `?tag=name` to get files for a specific tag. |
 | `/api/v1/document` | `GET` | Get file content via `path`, `start_line`, and `end_line`. |
 | `/api/v1/import` | `POST` | Import new content via JSON body `{ filename, content, dir? }`. |
+| `/api/v1/import/file` | `POST` | Import from disk via `{ source_path, move_file?, dir? }`. |
+| `/api/v1/reindex` | `POST` | Rebuild the entire search index from current vault files. |
 | `/health` | `GET` | Check server status and vault root location. |
 
 ---
@@ -152,7 +170,7 @@ docker run -d \
 
 ## 🗺️ Roadmap / TODOs
 
-- [ ] **Custom Vault Paths:** Allow `larch init <path>` to initialize the `.larch` database in a user-defined directory (like an existing Obsidian or Logseq vault) rather than hardcoding `~/.larch`.
+- [x] **Custom Vault Paths:** Allow `larch init <path>` to initialize the `.larch` database in a user-defined directory (like an existing Obsidian or Logseq vault) rather than hardcoding `~/.larch`.
 - [ ] **Smart Chunking Improvements:** Enhance the parser to better understand code blocks and nested bullet points.
 - [ ] **Larch Ecosystem: Pre-processing Extractors:** Provide official peripheral scripts (e.g., Python/Node CLI) to sync and convert documents from Lark Doc and Notion into Larch-compatible local Markdown.
 - [ ] **Larch Ecosystem: Post-processing AI UI:** Curate and officially support seamless integrations with popular LLM Chat UIs (like NextChat, LobeChat, Dify) utilizing Larch's REST API and MCP capabilities as their primary RAG backend.

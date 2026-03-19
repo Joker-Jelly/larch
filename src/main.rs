@@ -8,7 +8,7 @@ use tracing_subscriber::FmtSubscriber;
 use walkdir::WalkDir;
 
 use larch::config::{self as vault_config, VaultConfig};
-use larch::{import, index, mcp, parser, server, watcher};
+use larch::{client, import, index, lockfile, mcp, parser, server, watcher};
 
 use larch::utils::is_markdown;
 
@@ -40,6 +40,9 @@ enum Commands {
         /// Port to run the REST API on
         #[arg(short, long, default_value_t = 3000)]
         port: u16,
+        /// Also start MCP server over stdin/stdout
+        #[arg(long)]
+        mcp: bool,
     },
     /// Search and print results
     Search {
@@ -144,14 +147,18 @@ async fn main() -> Result<()> {
             println!("✅ Initialized Larch vault at {}", config.vault_root.display());
             println!("   You can now use `larch import <path>` to add markdown files.");
         }
-        Commands::Serve { port } => {
+        Commands::Serve { port, mcp: mcp_mode } => {
             let (config, tantivy_index, fields) = init_context()?;
             let reader = index::create_reader(&tantivy_index)?;
             let writer = index::create_writer(&tantivy_index)?;
             let writer_arc = Arc::new(Mutex::new(writer));
 
+            // Write lock file so CLI commands can detect running serve
+            let lock_path = config.serve_lock_path();
+            lockfile::write_lock(&lock_path, *port)?;
+
             let rx = watcher::start_watcher(&config)?;
-            
+
             // Spawn watcher event loop
             let fields_clone = fields.clone();
             let writer_clone = Arc::clone(&writer_arc);
@@ -159,6 +166,22 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 watcher::process_events(rx, fields_clone, writer_clone, config_clone).await;
             });
+
+            // Optionally spawn MCP stdio server (shares writer/reader)
+            if *mcp_mode {
+                let mcp_state = mcp::create_state(
+                    Arc::new(tantivy_index.clone()),
+                    fields.clone(),
+                    config.clone(),
+                    Arc::new(reader.clone()),
+                    Arc::clone(&writer_arc),
+                );
+                tokio::spawn(async move {
+                    if let Err(e) = mcp::run_stdio_transport(mcp_state).await {
+                        eprintln!("MCP server error: {}", e);
+                    }
+                });
+            }
 
             // Start API server
             let state = Arc::new(server::AppState {
@@ -171,8 +194,20 @@ async fn main() -> Result<()> {
             let app = server::build_router(state);
             let addr = format!("0.0.0.0:{}", port);
             let listener = TcpListener::bind(&addr).await?;
-            println!("🚀 Larch server running on http://{}", addr);
-            axum::serve(listener, app).await?;
+            eprintln!("🚀 Larch server running on http://{}", addr);
+
+            // Graceful shutdown: wait for either server exit or ctrl-c
+            tokio::select! {
+                result = axum::serve(listener, app) => {
+                    result?;
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    eprintln!("\nShutting down...");
+                }
+            }
+
+            // Clean up lock file
+            lockfile::remove_lock(&lock_path);
         }
         Commands::Search { query, limit, tag, dir } => {
             let (_config, tantivy_index, fields) = init_context()?;
@@ -264,6 +299,26 @@ async fn main() -> Result<()> {
         },
         Commands::Import { path, move_file, dir } => {
             let (config, tantivy_index, fields) = init_context()?;
+            let source_path = std::fs::canonicalize(path)?;
+
+            // If serve is running, delegate via HTTP
+            if let Some(info) = lockfile::read_lock(&config.serve_lock_path()) {
+                let c = client::ServeClient::new(info.port);
+                if c.is_healthy().await {
+                    let result = c.import_file(
+                        &source_path.to_string_lossy(),
+                        *move_file,
+                        dir.as_deref(),
+                    ).await?;
+                    println!("✅ Imported {} file(s) via serve (port {})", result.files_imported, info.port);
+                    return Ok(());
+                }
+                // Serve not reachable — stale lock, fall through to direct write
+                eprintln!("⚠️  Stale lock file detected, writing directly.");
+                lockfile::remove_lock(&config.serve_lock_path());
+            }
+
+            // Direct write (no serve running)
             let writer = index::create_writer(&tantivy_index)?;
             let writer_arc = Arc::new(Mutex::new(writer));
 
@@ -271,7 +326,6 @@ async fn main() -> Result<()> {
             let target_md_base = config.vault_root.join(target_sub_dir);
             std::fs::create_dir_all(&target_md_base)?;
 
-            let source_path = std::fs::canonicalize(path)?;
             if source_path.is_dir() {
                 let mut imported = 0;
                 for entry in WalkDir::new(&source_path).into_iter().filter_map(|e| e.ok()) {
@@ -326,12 +380,36 @@ async fn main() -> Result<()> {
         }
         Commands::Mcp => {
             let (config, tantivy_index, fields) = init_context()?;
+
+            // Warn if serve is already running (concurrent writers are unsafe)
+            if let Some(info) = lockfile::read_lock(&config.serve_lock_path()) {
+                eprintln!(
+                    "⚠️  larch serve is running (PID {}, port {}). \
+                     Running MCP separately risks write conflicts. \
+                     Consider `larch serve --mcp` instead.",
+                    info.pid, info.port
+                );
+            }
+
             mcp::run_stdio_server(config, tantivy_index, fields).await?;
         }
         Commands::Reindex => {
             let (config, _tantivy_index, _fields) = init_context()?;
+
+            // If serve is running, delegate via HTTP
+            if let Some(info) = lockfile::read_lock(&config.serve_lock_path()) {
+                let c = client::ServeClient::new(info.port);
+                if c.is_healthy().await {
+                    let result = c.reindex().await?;
+                    println!("✅ Reindexed {} files via serve (port {})", result.files_indexed, info.port);
+                    return Ok(());
+                }
+                eprintln!("⚠️  Stale lock file detected, reindexing directly.");
+                lockfile::remove_lock(&config.serve_lock_path());
+            }
+
+            // Direct reindex (no serve running)
             let index_dir = config.index_dir();
-            
             println!("Clearing old index at {}...", index_dir.display());
             if index_dir.exists() {
                 std::fs::remove_dir_all(&index_dir)?;
@@ -353,7 +431,7 @@ async fn main() -> Result<()> {
                         .unwrap_or(path)
                         .to_string_lossy()
                         .to_string();
-                    
+
                     if let Ok(result) = parser::parse_content(&source, &rel_path_str) {
                          let w = writer_arc.lock().unwrap_or_else(|e| e.into_inner());
                          if let Err(e) = index::index_file(&w, &fields, &rel_path_str, &result.chunks, &result.meta) {

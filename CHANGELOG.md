@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-03-19
+
+### Added
+- **Thin Client Architecture**: `larch serve` is now the single writer — MCP and CLI write commands delegate to it, eliminating concurrent IndexWriter conflicts.
+- **Embedded MCP Server**: `larch serve --mcp` runs both REST API and MCP stdio server in a single process with a shared write lock.
+- **CLI HTTP Delegation**: `larch import` and `larch reindex` automatically detect a running serve (via lock file) and delegate through HTTP API instead of writing directly.
+- **New REST Endpoints**: `POST /api/v1/reindex` and `POST /api/v1/import/file` for server-side reindex and disk-based file import.
+- **Lock File Management**: Serve writes a lock file (`.larch/serve.lock`) with PID and port; stale locks are auto-detected and cleaned up.
+- **Release Build Script**: `scripts/build-release.sh` for one-command cross-compilation (macOS arm64, Linux x86_64/arm64).
+
+### Changed
+- **Search Weight Tuning**: `summary` field is now jieba-indexed and participates in search scoring. New boosts: `keywords` 2.5, `title_hierarchy` 2.0, `summary` 1.5, `content` 1.0.
+- **TLS Backend**: Switched `reqwest` from native OpenSSL to `rustls` for easier cross-compilation and zero system TLS dependency.
+- Standalone `larch mcp` now warns when serve is already running to prevent write conflicts.
+- Graceful shutdown with Ctrl-C and automatic lock file cleanup.
+
+### Breaking
+- Schema change: `summary` field indexing requires `larch reindex` after upgrade.
+
+## [0.2.1] - 2026-03-17
+
+### Added
+- **Singleton IndexReader**: Use a single reusable reader instead of creating one per search call, fixing empty results with small limits.
+- **MCP Import Tool**: New `import` tool mirroring REST API `POST /api/v1/import`.
+- **Configurable Vault Path**: `~/.larch/config.json` for custom vault locations; `larch init <path>` accepts an optional path argument.
+- **Path Traversal Protection**: Import endpoints validate paths stay within vault boundary.
+
+### Changed
+- Strip ANSI codes from API/MCP responses, use `<b>` HTML tags instead.
+- Pass pre-opened index to MCP server to avoid duplicate index opening.
+- Auto-migrate old `~/.larch` vault layout to new config scheme.
+
 ## [0.2.0] - 2026-03-16
 
 ### Added

@@ -1,6 +1,6 @@
 [package]
 name = "larch"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Local-first Markdown AI Knowledge Engine"
 
@@ -22,6 +22,9 @@ gray_matter = "0.2"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors"] }
+
+# HTTP client (for CLI → serve delegation)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # File watching
 notify = "8"
