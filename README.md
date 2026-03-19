@@ -18,19 +18,20 @@ Built in Rust, it uses **Tantivy** for high-performance full-text search and is 
 
 ## 📦 Installation
 
-Larch provides pre-compiled standalone binaries. You do not need Rust installed.
-
-### Quick Install (macOS / Linux)
-The easiest way to install Larch is via our official installation script:
-
+### From Source (Recommended)
 ```bash
-curl -LsSf https://raw.githubusercontent.com/Joker-Jelly/larch/master/install.sh | sh
+git clone git@code.byted.org:tiktok/larch.git
+cd larch
+cargo build --release
+cp target/release/larch /usr/local/bin/
 ```
 
-### Manual Download
-1. Go to the [Releases page](https://github.com/Joker-Jelly/larch/releases/latest) on GitHub.
-2. Download the binary archive for your operating system and architecture.
-3. Extract the `larch` executable and move it to your path (e.g. `/usr/local/bin`).
+### Pre-built Binaries
+Pre-built binaries for macOS (arm64) and Linux (x86_64/arm64) are available in the `dist/` directory after running the release build script:
+```bash
+./scripts/build-release.sh
+```
+Or download from the [Releases page](https://code.byted.org/tiktok/larch/-/releases) and extract to your PATH.
 
 ## 🛠️ Usage
 
@@ -96,12 +97,17 @@ larch reindex
 
 ## 🛠️ Development (Build from Source)
 
-If you prefer to compile Larch yourself or want to contribute to the project, you'll need [Rust and Cargo](https://rustup.rs/) installed:
+If you want to contribute or build from source:
 
 ```bash
-git clone https://github.com/Joker-Jelly/larch.git
+git clone git@code.byted.org:tiktok/larch.git
 cd larch
 cargo build --release
+```
+
+Cross-compile for multiple platforms:
+```bash
+./scripts/build-release.sh
 ```
 
 ---
