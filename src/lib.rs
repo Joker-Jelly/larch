@@ -10,5 +10,6 @@ pub mod parser;
 pub mod server;
 pub mod watcher;
 pub mod tree;
+pub mod service;
 pub mod tag;
 pub mod utils;

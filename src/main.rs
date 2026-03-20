@@ -8,7 +8,7 @@ use tracing_subscriber::FmtSubscriber;
 use walkdir::WalkDir;
 
 use larch::config::{self as vault_config, VaultConfig};
-use larch::{client, import, index, lockfile, mcp, parser, server, watcher};
+use larch::{client, import, index, lockfile, mcp, parser, server, service, watcher};
 
 use larch::utils::is_markdown;
 
@@ -103,6 +103,11 @@ enum Commands {
     Mcp,
     /// Rebuild the entire search index from the current vault files
     Reindex,
+    /// Manage larch as a system service (launchd/systemd)
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -115,6 +120,20 @@ enum TagCommands {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ServiceCommands {
+    /// Install larch as a system service
+    Install {
+        /// Port for the larch serve instance
+        #[arg(short, long, default_value_t = 3000)]
+        port: u16,
+    },
+    /// Uninstall larch system service
+    Uninstall,
+    /// Check service status
+    Status,
 }
 
 #[tokio::main]
@@ -444,6 +463,17 @@ async fn main() -> Result<()> {
             writer_arc.lock().unwrap_or_else(|e| e.into_inner()).commit()?;
             println!("✅ Successfully re-indexed {} markdown files.", count);
         }
+        Commands::Service { command } => match command {
+            ServiceCommands::Install { port } => {
+                service::install(*port)?;
+            }
+            ServiceCommands::Uninstall => {
+                service::uninstall()?;
+            }
+            ServiceCommands::Status => {
+                service::status()?;
+            }
+        },
     }
 
     Ok(())
